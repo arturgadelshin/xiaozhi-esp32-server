@@ -3,14 +3,24 @@ import socket
 import subprocess
 import re
 import os
+import wave
 from io import BytesIO
-from typing import Callable, Any
 from core.utils import p3
 import numpy as np
 import requests
 import opuslib_next
 from pydub import AudioSegment
 import copy
+import io
+import logging
+from typing import List
+
+# Настройка логгера
+logger = logging.getLogger(__name__)
+
+
+
+
 
 TAG = __name__
 emoji_map = {
@@ -211,7 +221,7 @@ def extract_json_from_string(input_string):
     return None
 
 
-def audio_to_data_stream(audio_file_path, is_opus=True, callback: Callable[[Any], Any]=None) -> None:
+def audio_to_data(audio_file_path, is_opus=True):
     # 获取文件后缀名
     file_type = os.path.splitext(audio_file_path)[1]
     if file_type:
@@ -224,29 +234,33 @@ def audio_to_data_stream(audio_file_path, is_opus=True, callback: Callable[[Any]
     # 转换为单声道/16kHz采样率/16位小端编码（确保与编码器匹配）
     audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
 
+    # 音频时长(秒)
+    duration = len(audio) / 1000.0
+
     # 获取原始PCM数据（16位小端）
     raw_data = audio.raw_data
-    pcm_to_data_stream(raw_data, is_opus, callback)
+    return pcm_to_data(raw_data, is_opus), duration
 
 
-def audio_bytes_to_data_stream(audio_bytes, file_type, is_opus, callback: Callable[[Any], Any]) -> None:
+def audio_bytes_to_data(audio_bytes, file_type, is_opus=True):
     """
     直接用音频二进制数据转为opus/pcm数据，支持wav、mp3、p3
     """
     if file_type == "p3":
         # 直接用p3解码
-        return p3.decode_opus_from_bytes_stream(audio_bytes, callback)
+        return p3.decode_opus_from_bytes(audio_bytes)
     else:
         # 其他格式用pydub
         audio = AudioSegment.from_file(
             BytesIO(audio_bytes), format=file_type, parameters=["-nostdin"]
         )
         audio = audio.set_channels(1).set_frame_rate(16000).set_sample_width(2)
+        duration = len(audio) / 1000.0
         raw_data = audio.raw_data
-        pcm_to_data_stream(raw_data, is_opus, callback)
+        return pcm_to_data(raw_data, is_opus), duration
 
 
-def pcm_to_data_stream(raw_data, is_opus=True, callback: Callable[[Any], Any] = None):
+def pcm_to_data(raw_data, is_opus=True):
     # 初始化Opus编码器
     encoder = opuslib_next.Encoder(16000, 1, opuslib_next.APPLICATION_AUDIO)
 
@@ -254,6 +268,7 @@ def pcm_to_data_stream(raw_data, is_opus=True, callback: Callable[[Any], Any] = 
     frame_duration = 60  # 60ms per frame
     frame_size = int(16000 * frame_duration / 1000)  # 960 samples/frame
 
+    datas = []
     # 按帧处理所有音频数据（包括最后一帧可能补零）
     for i in range(0, len(raw_data), frame_size * 2):  # 16bit=2bytes/sample
         # 获取当前帧的二进制数据
@@ -268,10 +283,39 @@ def pcm_to_data_stream(raw_data, is_opus=True, callback: Callable[[Any], Any] = 
             np_frame = np.frombuffer(chunk, dtype=np.int16)
             # 编码Opus数据
             frame_data = encoder.encode(np_frame.tobytes(), frame_size)
-            callback(frame_data)
         else:
             frame_data = chunk if isinstance(chunk, bytes) else bytes(chunk)
-            callback(frame_data)
+
+        datas.append(frame_data)
+
+    return datas
+
+
+def opus_datas_to_wav_bytes(opus_datas, sample_rate=16000, channels=1):
+    """
+    将opus帧列表解码为wav字节流
+    """
+    decoder = opuslib_next.Decoder(sample_rate, channels)
+    pcm_datas = []
+
+    frame_duration = 60  # ms
+    frame_size = int(sample_rate * frame_duration / 1000)  # 960
+
+    for opus_frame in opus_datas:
+        # 解码为PCM（返回bytes，2字节/采样点）
+        pcm = decoder.decode(opus_frame, frame_size)
+        pcm_datas.append(pcm)
+
+    pcm_bytes = b"".join(pcm_datas)
+
+    # 写入wav字节流
+    wav_buffer = BytesIO()
+    with wave.open(wav_buffer, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)  # 16bit
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+    return wav_buffer.getvalue()
 
 
 def check_vad_update(before_config, new_config):
@@ -431,3 +475,69 @@ def validate_mcp_endpoint(mcp_endpoint: str) -> bool:
         return False
 
     return True
+
+# core/utils/util.py
+
+import io
+import logging
+from typing import List
+
+# Настройка логгера
+logger = logging.getLogger(__name__)
+
+def decode_opus(opus_packets: List[bytes]) -> bytes:
+    """
+    Декодирует Opus-пакеты в PCM 16-bit, 16kHz, mono.
+    Использует opuslib.
+    Установка: pip install opuslib
+    """
+    try:
+        import opuslib
+
+        # Создаём декодер: 16 кГц, 1 канал
+        decoder = opuslib.Decoder(fs=16000, channels=1)
+
+        pcm_data = b""
+
+        for i, packet in enumerate(opus_packets):
+            try:
+                # Убедимся, что packet — это bytes
+                if isinstance(packet, memoryview):
+                    packet = packet.tobytes()
+                elif isinstance(packet, bytearray):
+                    packet = bytes(packet)
+                elif not isinstance(packet, (bytes, bytearray)):
+                    logger.warning(f"Пакет {i} имеет тип {type(packet)}, пропущен")
+                    continue
+
+                # Длина пакета
+                if len(packet) == 0:
+                    continue
+
+                # Декодируем пакет
+                # opuslib требует, чтобы frame_size был кратен 2.5, 5, 10, 20, 40 или 60 мс
+                # При 16 кГц: 960 сэмплов = 60 мс
+                frame = decoder.decode(packet, frame_size=960)
+
+                if frame:
+                    pcm_data += frame
+                else:
+                    logger.debug(f"Декодер вернул пустой фрейм для пакета {i}")
+
+            except Exception as e:
+                logger.warning(f"Ошибка декодирования пакета {i} (длина {len(packet)}): {e}")
+                continue
+
+        if not pcm_data:
+            logger.error("После декодирования PCM-данные пусты")
+        else:
+            logger.debug(f"Успешно декодировано {len(pcm_data)} байт PCM")
+
+        return pcm_data
+
+    except ImportError:
+        logger.critical("Модуль 'opuslib' не установлен. Выполните: pip install opuslib")
+        raise
+    except Exception as e:
+        logger.error(f"Критическая ошибка при декодировании Opus: {e}")
+        return b""

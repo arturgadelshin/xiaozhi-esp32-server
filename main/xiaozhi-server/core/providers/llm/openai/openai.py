@@ -110,5 +110,12 @@ class LLMProvider(LLMProviderBase):
                     )
 
         except Exception as e:
-            logger.bind(tag=TAG).error(f"Error in function call streaming: {e}")
-            yield f"【OpenAI服务响应异常: {e}】", None
+            error_text = str(e)
+            # Если ошибка содержит кириллицу, можно заменить на нейтральное сообщение
+            if any(ord(c) > 127 for c in error_text):
+                safe_response = "Извини, произошла ошибка при обработке запроса."
+            else:
+                safe_response = f"Ошибка: {error_text}"
+
+            logger.bind(tag=TAG).error(f"Error in function call streaming: {error_text}")
+            yield safe_response, None
