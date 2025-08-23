@@ -12,14 +12,14 @@ class OTAHandler(BaseHandler):
         super().__init__(config)
 
     def _get_websocket_url(self, local_ip: str, port: int) -> str:
-        """获取websocket地址
+        """Get the websocket address
 
         Args:
-            local_ip: 本地IP地址
-            port: 端口号
+        local_ip: Local IP address
+        port: Port number
 
         Returns:
-            str: websocket地址
+        str: Websocket address
         """
         server_config = self.config["server"]
         websocket_config = server_config.get("websocket", "")
@@ -30,18 +30,18 @@ class OTAHandler(BaseHandler):
             return f"ws://{local_ip}:{port}/xiaozhi/v1/"
 
     async def handle_post(self, request):
-        """处理 OTA POST 请求"""
+        """Handling OTA POST requests"""
         try:
             data = await request.text()
-            self.logger.bind(tag=TAG).debug(f"OTA请求方法: {request.method}")
-            self.logger.bind(tag=TAG).debug(f"OTA请求头: {request.headers}")
-            self.logger.bind(tag=TAG).debug(f"OTA请求数据: {data}")
+            self.logger.bind(tag=TAG).debug(f"OTA request method: {request.method}")
+            self.logger.bind(tag=TAG).debug(f"OTA request header: {request.headers}")
+            self.logger.bind(tag=TAG).debug(f"OTA request data: {data}")
 
             device_id = request.headers.get("device-id", "")
             if device_id:
-                self.logger.bind(tag=TAG).info(f"OTA请求设备ID: {device_id}")
+                self.logger.bind(tag=TAG).info(f"OTA request device ID: {device_id}")
             else:
-                raise Exception("OTA请求设备ID为空")
+                raise Exception("OTA request device ID is empty")
 
             data_json = json.loads(data)
 
@@ -77,17 +77,17 @@ class OTAHandler(BaseHandler):
             return response
 
     async def handle_get(self, request):
-        """处理 OTA GET 请求"""
+        """Handling OTA GET requests"""
         try:
             server_config = self.config["server"]
             local_ip = get_local_ip()
             port = int(server_config.get("port", 8000))
             websocket_url = self._get_websocket_url(local_ip, port)
-            message = f"OTA接口运行正常，向设备发送的websocket地址是：{websocket_url}"
+            message = f"The OTA interface is running normally, and the websocket address sent to the device is：{websocket_url}"
             response = web.Response(text=message, content_type="text/plain")
         except Exception as e:
-            self.logger.bind(tag=TAG).error(f"OTA GET请求异常: {e}")
-            response = web.Response(text="OTA接口异常", content_type="text/plain")
+            self.logger.bind(tag=TAG).error(f"OTA GET request exception: {e}")
+            response = web.Response(text="OTA interface abnormality", content_type="text/plain")
         finally:
             self._add_cors_headers(response)
             return response

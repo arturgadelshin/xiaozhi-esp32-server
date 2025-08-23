@@ -91,30 +91,32 @@ class ASRProvider(ASRProviderBase):
             return samples_float32, f.getframerate()
 
     async def speech_to_text(
-            self, opus_data: list[bytes], session_id: str, audio_format="opus"
-    ) -> tuple[str | None, str | None]:
+            self, opus_data: List[bytes], session_id: str, audio_format="opus"
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Основной метод: Opus → PCM → Распознавание"""
         file_path = None
         try:
-            # Декодируем Opus → PCM
-            from core.utils.util import decode_opus
-            pcm_data = decode_opus(opus_data)
+            start_time = time.time()
+
+            # 🔽🔽🔽 ДОБАВЛЕННЫЙ ЛОГ: Сколько байт пришло
+            total_bytes = sum(len(chunk) for chunk in opus_data)
+            logger.bind(tag=TAG).info("ASR processing audio: %d bytes", total_bytes)
+
+            if total_bytes == 0:
+                logger.bind(tag=TAG).error("Получено 0 байт аудио — возможно, ошибка на стороне клиента")
+                return "", None
+            # 🔼🔼🔼
+
+            # Декодируем Opus в PCM
+            if audio_format == "pcm":
+                pcm_data = b"".join(opus_data)
+            else:
+                from core.utils.util import decode_opus
+                pcm_data = decode_opus(opus_data)
 
             if not pcm_data:
                 logger.bind(tag=TAG).error("Пустые аудиоданные после декодирования")
                 return "", None
-
-            # Сохраняем временный файл
-            file_path = self.save_audio_to_file(pcm_data, session_id)
-
-            # Распознавание
-            start_time = time.time()
-            stream = self.model.create_stream()
-            samples, sample_rate = self.read_wave(file_path)
-            stream.accept_waveform(sample_rate, samples)
-            self.model.decode_stream(stream)
-            text = stream.result.text.strip()
-            logger.bind(tag=TAG).debug(f"Распознано: '{text}' за {time.time() - start_time:.3f} с")
-            return text, file_path
 
         except Exception as e:
             logger.bind(tag=TAG).error(f"Ошибка ASR: {e}")

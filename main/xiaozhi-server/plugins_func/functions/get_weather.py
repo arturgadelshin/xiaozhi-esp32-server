@@ -150,7 +150,7 @@ def parse_weather_info(soup):
 
 
 @register_function("get_weather", GET_WEATHER_FUNCTION_DESC, ToolType.SYSTEM_CTL)
-def get_weather(conn, location: str = None, lang: str = "zh_CN"):
+def get_weather(conn, location: str = None, lang: str = "ru_RU"):
     from core.utils.cache.manager import cache_manager, CacheType
 
     api_host = conn.config["plugins"]["get_weather"].get(

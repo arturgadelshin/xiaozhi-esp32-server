@@ -16,83 +16,84 @@ from core.utils.wakeup_word import WakeupWordsConfig
 
 TAG = __name__
 
+# Конфигурация активации по ключевым словам
 WAKEUP_CONFIG = {
-    "refresh_time": 5,
-    "words": ["你好", "你好啊", "嘿，你好", "嗨"],
+    "refresh_time": 5,  # Время (сек), после которого можно обновить приветствие
+    "words": ["привет", "эй", "ассистент", "слушай", "будь добр"],  # Поддерживаемые wake-слова
 }
 
-# 创建全局的唤醒词配置管理器
+# Глобальный менеджер настроек wake-слов
 wakeup_words_config = WakeupWordsConfig()
 
-# 用于防止并发调用wakeupWordsResponse的锁
+# Блокировка для предотвращения одновременного вызова wakeupWordsResponse
 _wakeup_response_lock = asyncio.Lock()
 
 
 async def handleHelloMessage(conn, msg_json):
-    """处理hello消息"""
+    """Обрабатывает сообщение 'hello' от клиента"""
     audio_params = msg_json.get("audio_params")
     if audio_params:
         format = audio_params.get("format")
-        conn.logger.bind(tag=TAG).info(f"客户端音频格式: {format}")
+        conn.logger.bind(tag=TAG).info(f"Формат аудио клиента: {format}")
         conn.audio_format = format
         conn.welcome_msg["audio_params"] = audio_params
+
     features = msg_json.get("features")
     if features:
-        conn.logger.bind(tag=TAG).info(f"客户端特性: {features}")
+        conn.logger.bind(tag=TAG).info(f"Возможности клиента: {features}")
         conn.features = features
         if features.get("mcp"):
-            conn.logger.bind(tag=TAG).info("客户端支持MCP")
+            conn.logger.bind(tag=TAG).info("Клиент поддерживает MCP")
             conn.mcp_client = MCPClient()
-            # 发送初始化
+            # Отправить инициализацию
             asyncio.create_task(send_mcp_initialize_message(conn))
-            # 发送mcp消息，获取tools列表
+            # Запросить список инструментов
             asyncio.create_task(send_mcp_tools_list_request(conn))
 
     await conn.websocket.send(json.dumps(conn.welcome_msg))
 
 
 async def checkWakeupWords(conn, text):
-    enable_wakeup_words_response_cache = conn.config[
-        "enable_wakeup_words_response_cache"
-    ]
+    """Проверяет, произнесено ли ключевое слово, и отвечает"""
+    enable_wakeup_words_response_cache = conn.config.get("enable_wakeup_words_response_cache")
 
     if not enable_wakeup_words_response_cache or not conn.tts:
         return False
 
     _, filtered_text = remove_punctuation_and_length(text)
-    if filtered_text not in conn.config.get("wakeup_words"):
+    if filtered_text not in conn.config.get("wakeup_words", []):
         return False
 
     conn.just_woken_up = True
     await send_stt_message(conn, text)
 
-    # 获取当前音色
+    # Получаем текущий голос
     voice = getattr(conn.tts, "voice", "default")
     if not voice:
         voice = "default"
 
-    # 获取唤醒词回复配置
+    # Получаем настройку ответа на пробуждение
     response = wakeup_words_config.get_wakeup_response(voice)
     if not response or not response.get("file_path"):
         response = {
             "voice": "default",
             "file_path": "config/assets/wakeup_words.wav",
             "time": 0,
-            "text": "哈啰啊，我是小智啦，声音好听的台湾女孩一枚，超开心认识你耶，最近在忙啥，别忘了给我来点有趣的料哦，我超爱听八卦的啦",
+            "text": "Привет! Я — голосовой помощник. Готов помочь с умным домом или просто поболтать!",
         }
 
-    # 播放唤醒词回复
+    # Проигрываем аудио-ответ
     conn.client_abort = False
     opus_packets, _ = audio_to_data(response.get("file_path"))
 
-    conn.logger.bind(tag=TAG).info(f"播放唤醒词回复: {response.get('text')}")
+    conn.logger.bind(tag=TAG).info(f"Проигрывается приветствие: {response.get('text')}")
     await sendAudioMessage(conn, SentenceType.FIRST, opus_packets, response.get("text"))
     await sendAudioMessage(conn, SentenceType.LAST, [], None)
 
-    # 补充对话
+    # Добавляем в историю диалога
     conn.dialogue.put(Message(role="assistant", content=response.get("text")))
 
-    # 检查是否需要更新唤醒词回复
+    # Проверяем, нужно ли обновить приветствие
     if time.time() - response.get("time", 0) > WAKEUP_CONFIG["refresh_time"]:
         if not _wakeup_response_lock.locked():
             asyncio.create_task(wakeupWordsResponse(conn))
@@ -100,42 +101,44 @@ async def checkWakeupWords(conn, text):
 
 
 async def wakeupWordsResponse(conn):
+    """Генерирует новое уникальное приветствие через LLM + TTS"""
     if not conn.tts or not conn.llm or not conn.llm.response_no_stream:
         return
 
     try:
-        # 尝试获取锁，如果获取不到就返回
+        # Пытаемся получить блокировку
         if not await _wakeup_response_lock.acquire():
             return
 
-        # 生成唤醒词回复
+        # Генерируем случайное ключевое слово
         wakeup_word = random.choice(WAKEUP_CONFIG["words"])
         question = (
-            "此刻用户正在和你说```"
-            + wakeup_word
-            + "```。\n请你根据以上用户的内容进行20-30字回复。要符合系统设置的角色情感和态度，不要像机器人一样说话。\n"
-            + "请勿对这条内容本身进行任何解释和回应，请勿返回表情符号，仅返回对用户的内容的回复。"
+            f"Пользователь сказал: `{wakeup_word}`.\n"
+            "Ответь в 20–30 слов на русском языке. Будь дружелюбным, живым, как настоящий человек.\n"
+            "Не объясняй свой ответ, не используй эмодзи. Только текст ответа."
         )
 
         result = conn.llm.response_no_stream(conn.config["prompt"], question)
-        if not result or len(result) == 0:
+        if not result or len(result.strip()) == 0:
             return
 
-        # 生成TTS音频
+        # Генерируем аудио через TTS
         tts_result = await asyncio.to_thread(conn.tts.to_tts, result)
         if not tts_result:
             return
 
-        # 获取当前音色
+        # Получаем текущий голос
         voice = getattr(conn.tts, "voice", "default")
 
         wav_bytes = opus_datas_to_wav_bytes(tts_result, sample_rate=16000)
         file_path = wakeup_words_config.generate_file_path(voice)
         with open(file_path, "wb") as f:
             f.write(wav_bytes)
-        # 更新配置
+
+        # Обновляем настройку приветствия
         wakeup_words_config.update_wakeup_response(voice, file_path, result)
+
     finally:
-        # 确保在任何情况下都释放锁
+        # Гарантированно освобождаем блокировку
         if _wakeup_response_lock.locked():
             _wakeup_response_lock.release()
